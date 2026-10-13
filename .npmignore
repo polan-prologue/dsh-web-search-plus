@@ -1,0 +1,27 @@
+# ---------------------------------------------------------------------------
+# 发布包忽略规则（npm pack）
+#
+# ⚠️ **实测确认的 npm 语义**：只要 `package.json` 里有 `files` 字段，npm 就完全无视
+#    `.npmignore` 与 `.gitignore`（npm-packlist 源码：`package.json means no .npmignore
+#    or .gitignore`）。本包有 `files`，所以对 `npm pack` 真正把关的是那份白名单；
+#    本文件只在**将来删掉 `files`** 时才生效。
+#
+# 三条渠道各有各的闸门：
+#   npm pack                                       -> `files` 白名单（本文件此时无效）
+#   git 提交                                       -> `.gitignore`
+#   目录复制 / `dsh plugin add <目录>`（Junction）  -> 两个文件都不看，靠「目录里没有」
+# ---------------------------------------------------------------------------
+.runtime/
+*.jsonl
+
+*.bak
+*.bak-*
+*.orig
+*.rej
+*.tmp
+*.tmp.mjs
+*.tmp.cjs
+.tmp-*
+*.log
+
+node_modules/

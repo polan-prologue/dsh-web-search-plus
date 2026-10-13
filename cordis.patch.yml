@@ -1,0 +1,8 @@
+# dsh bundle patch: 把「网页搜索++」插入 profile 的层栈。
+#
+# 本行只插入插件自身。要让链式提供方真正接管联网搜索，还需要把 `web` 行的
+# searchProvider 指向 `web-search-plus`（插件页的「立即接管」按钮会做这件事，
+# 也可以手工追加一个 id 为 web 的覆盖行，见 README）。
+- insert:
+    - id: web-search-plus
+      name: 'dsh-web-search-plus'

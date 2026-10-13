@@ -1,0 +1,60 @@
+{
+  "name": "dsh-web-search-plus",
+  "version": "0.1.0",
+  "description": "网页搜索++：在 DeepSeek 原生搜索与第三方 Tavily 搜索之间选择使用顺序，并支持多个 Tavily 密钥轮换",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/polan-prologue/dsh-web-search-plus.git"
+  },
+  "homepage": "https://github.com/polan-prologue/dsh-web-search-plus#readme",
+  "bugs": {
+    "url": "https://github.com/polan-prologue/dsh-web-search-plus/issues"
+  },
+  "type": "module",
+  "main": "lib/index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "docs",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-plugin-manager"
+      ],
+      "platform": "web"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "^3.18.4"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/schemastery": {
+      "optional": true
+    }
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "dsh-plugin",
+    "web-search",
+    "tavily",
+    "search-provider"
+  ],
+  "license": "MIT"
+}
