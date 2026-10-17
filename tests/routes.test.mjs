@@ -244,10 +244,10 @@ describe('路由：来源校验（挡浏览器里的恶意页面）', () => {
 	 * @param {object} headers - 覆盖的头。
 	 * @returns {Promise<object>} 响应。
 	 */
-	async function callWith(harness, method, path, body, headers) {
+	async function callWith(harness, method, path, body, headers, deployment) {
 		const suffix = path.length === 0 || path.startsWith('/') ? path : '/' + path
 		const res = fakeResponse()
-		await harness.handler(fakeRequest(method, ROUTE_PREFIX + suffix, body, '127.0.0.1', headers), res)
+		await harness.handler(fakeRequest(method, ROUTE_PREFIX + suffix, body, '127.0.0.1', headers), res, deployment)
 		return res
 	}
 
@@ -290,6 +290,65 @@ describe('路由：来源校验（挡浏览器里的恶意页面）', () => {
 		assert.equal(res.captured.status, 200)
 	})
 
+/*
+	 * 报障：DSH 部署在服务器上、经公网 IP 访问时，插件页报
+	 * 「读取失败：只接受 Host 为本机回环地址的请求（收到『192.144.175.20:10443』）」。
+	 *
+	 * 第一版把 Host 写死成回环地址，等于把「远程部署」这种正常用法全挡了。
+	 * 现在按宿主 isTrustedApiRequest 的判据：回环、绑定地址字面量、或部署 origin 的
+	 * authority 都算「自己人」；跨站判据仍然照旧生效。
+	 */
+	it('服务器部署：Host 等于绑定地址时放行', async () => {
+		const harness = makeRouter({})
+		const res = await callWith(harness, 'GET', '', undefined, { host: '192.144.175.20:10443' }, {
+			binding: '192.144.175.20',
+			origin: 'http://192.144.175.20:10443'
+		})
+		assert.equal(res.captured.status, 200, '远程部署的正常请求不能被挡')
+	})
+
+	it('服务器部署：Host 等于部署 origin 的 authority 时放行（反代/域名）', async () => {
+		const harness = makeRouter({})
+		const res = await callWith(harness, 'GET', '', undefined, { host: 'dsh.example.com' }, {
+			origin: 'https://dsh.example.com'
+		})
+		assert.equal(res.captured.status, 200)
+	})
+
+	it('服务器部署：伪造 Host 仍然被拒（不能因为放宽就失守）', async () => {
+		const harness = makeRouter({})
+		const res = await callWith(harness, 'GET', '', undefined, { host: 'evil.example.com' }, {
+			binding: '192.144.175.20',
+			origin: 'http://192.144.175.20:10443'
+		})
+		assert.equal(res.captured.status, 403, '放宽到绑定地址后，陌生 Host 仍必须被拒')
+	})
+
+	it('服务器部署：跨站 Origin 仍然被拒', async () => {
+		const harness = makeRouter({})
+		const res = await callWith(harness, 'GET', '', undefined, {
+			host: '192.144.175.20:10443',
+			origin: 'https://evil.example.com'
+		}, { binding: '192.144.175.20' })
+		assert.equal(res.captured.status, 403)
+	})
+
+	it('https 部署下，同源 Origin 带 scheme 也能通过', async () => {
+		const harness = makeRouter({})
+		const res = await callWith(harness, 'GET', '', undefined, {
+			host: 'dsh.example.com',
+			origin: 'https://dsh.example.com'
+		}, { origin: 'https://dsh.example.com' })
+		assert.equal(res.captured.status, 200, 'Host 不带 scheme，Origin 带 https，应视为同源')
+	})
+
+	it('读不到 webServer 部署信息时退化为只认回环，不放宽', async () => {
+		const harness = makeRouter({})
+		const localhost = await callWith(harness, 'GET', '', undefined, { host: '127.0.0.1:3124' }, {})
+		assert.equal(localhost.captured.status, 200)
+		const remote = await callWith(harness, 'GET', '', undefined, { host: '192.144.175.20:10443' }, {})
+		assert.equal(remote.captured.status, 403, '没有部署信息时不得凭空信任任何公网 Host')
+	})
 	it('sec-fetch-site: cross-site 被拒绝（不依赖 Host 白名单的纵深判据）', async () => {
 		/*
 		 * 这条与 Host 白名单**故意重复**：白名单若哪天被放宽（远程访问、改监听地址），
