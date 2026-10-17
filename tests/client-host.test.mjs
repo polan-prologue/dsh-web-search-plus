@@ -124,7 +124,7 @@ describe('客户端真实请求 → 真实宿主路由', () => {
 		const ctx = {
 			web: {
 				searchProviders: new Map([['deepseek-official', { available: () => true, search: async () => ({ sources: [], truncated: false }) }]]),
-				searchProviderId: 'deepseek-official',
+				config: { searchProvider: { get: () => 'deepseek-official' }, fetchProvider: { get: () => 'http' } },
 				registerSearchProvider(p) { registered.set(p.id, p); return () => registered.delete(p.id) }
 			},
 			get(name) {
@@ -169,6 +169,8 @@ describe('客户端真实请求 → 真实宿主路由', () => {
 			const req = {
 				method: init?.method ?? 'GET',
 				url,
+				// 真实浏览器发请求一定带 Host；写操作带 JSON content-type。
+				headers: { host: '127.0.0.1:3124', ...((init?.method ?? 'GET') === 'GET' ? {} : { 'content-type': 'application/json' }) },
 				socket: { remoteAddress: '127.0.0.1' },
 				on(event, handler) {
 					listeners.set(event, handler)

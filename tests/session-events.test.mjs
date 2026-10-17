@@ -87,7 +87,7 @@ function bootWithSessionProbe() {
 	const ctx = {
 		web: {
 			searchProviders: new Map([['deepseek-official', deepSeek]]),
-			searchProviderId: 'web-search-plus',
+			config: { searchProvider: { get: () => 'web-search-plus' }, fetchProvider: { get: () => 'http' } },
 			registerSearchProvider(provider) {
 				registered.set(provider.id, provider)
 				return () => registered.delete(provider.id)

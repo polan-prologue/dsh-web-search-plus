@@ -169,12 +169,20 @@ function renderPage(options = {}) {
 	vm.runInContext(readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8'), vm.createContext(sandbox))
 	assert.equal(loaded.id, 'dsh-web-search-plus', '客户端 bundle id 不对')
 
-	// 按 useState 的调用顺序播种：0=snapshot, 1=error, 2=busy, 3=drafts, 4=revealed, 5=options…
+	// 按 useState 的调用顺序播种。
+	// 0=snapshot, 1=error, 2=pending, 3=drafts, 4=revealed, 5=revealing, 6=fromStored, 7=options, 8=probe, 9=usage, 10=message
+	//
+	// ⚠️ 新增一个 useState 就要顺移这里的索引：本文件用序号播种（而不是按名字），
+	// 插在中间的 state 会把后面全部挤位——表现是「选项复选框没勾上」这类
+	// 与本次改动毫无关系的假红。上次加 revealing 时就踩过。
 	const overrides = {
 		0: options.snapshot ?? SNAPSHOT,
+		2: options.pending ?? {},
 		3: options.drafts ?? {},
 		4: options.revealed ?? {},
-		5: options.options ?? {}
+		5: options.revealing ?? {},
+		6: options.fromStored ?? {},
+		7: options.options ?? {}
 	}
 	let callIndex = 0
 	const react = {
@@ -187,7 +195,19 @@ function renderPage(options = {}) {
 		useCallback: (fn) => fn,
 		useEffect: () => {},
 		useMemo: (fn) => fn(),
-		useRef: () => ({ current: 0 })
+		// useRef 必须**稳定**：真实 React 里同一个 ref 在组件生命周期内是同一个对象。
+		// 每次返回新对象会让「用 ref 存同步镜像」的代码在测试里表现成永不为真，
+		// 从而把真实缺陷掩盖成绿灯。
+		useRef: (() => {
+			const refs = []
+			let refIndex = 0
+			return (initial) => {
+				const at = refIndex
+				refIndex += 1
+				if (refs[at] === undefined) refs[at] = { current: initial }
+				return refs[at]
+			}
+		})()
 	}
 	const mod = loaded.factory((name) => (name === 'react' ? react : {}))
 	// 必须真的跑一遍 apply()，样式才会经由 effect 注入 —— 否则 mod.styles 是空的，
@@ -326,16 +346,23 @@ describe('插件页渲染：Tavily 密钥申请入口', () => {
 		assert.match(source, /TAVILY_HOME_URL = 'https:\/\/app\.tavily\.com\/home'/, '未定义正确的 Tavily 地址常量')
 	})
 
-	it('概览卡片渲染成自带标题的摘要卡，而不是一行纯文本', () => {
+	it('概览卡片只渲染一句说明，不重复宿主已渲染的标题、也不自带展开开关', () => {
 		/*
-		 * 早先这里是 `return t('summary')` —— 在「体验优化」分区里插槽会把每个条目
-		 * 各渲染一次，于是两张卡片的简介首尾相接，变成一整段没有标题、没有控件的
-		 * 粗体长文（用户截图报障的正是这个）。
+		 * 这条断言背后的历史是两轮真实报障，别再把它们改回去：
 		 *
-		 * 现在 summary 必须是一张**自带标题的卡片**：左标题 + 一行简介 + 右侧展开按钮。
-		 * 这里用**记录式的取词函数**断言标题与说明各自取了哪个字典键 ——
-		 * 直接扫渲染出的文本是不行的：函数组件会被 flatten 展开，
-		 * 文案字符串在中途就丢了（本机踩过，第一版断言就是这么假红的）。
+		 * 1. 最早这里是 `return t('summary')`，插槽把每个条目各渲染一次，两张卡的
+		 *    简介首尾相接 —— 报障「两张卡挤成一整段」。
+		 * 2. 于是改成「自带标题 + 展开按钮 + 原位渲染完整页」。结果：宿主摘要位本来
+		 *    就紧挨着渲染条目标题，摘要里再写一遍 → 界面上同名两行（本次报障①）；
+		 *    而宿主的卡片标题按钮带整卡热区，摘要里的展开按钮永远点不到，点了实际
+		 *    是「打开详情页」；更糟的是摘要位在列表卡与详情页各渲染一次，一展开就
+		 *    同时挂两份同一个页面（本次报障②的成因）。
+		 *
+		 * 现在的契约：摘要位**只输出一句说明**。
+		 *   - 不得出现 title 文案（标题归宿主）；
+		 *   - 不得有 button（宿主卡片里不能再塞第二个可点控件）；
+		 *   - 不得渲染 wsp-page（完整页只由 view:'page' 出）。
+		 * 用记录式取词函数断言，因为函数组件会被 flatten 展开、文案字符串中途丢失。
 		 */
 		const { mod } = renderPage()
 		const requested = []
@@ -347,13 +374,13 @@ describe('插件页渲染：Tavily 密钥申请入口', () => {
 		const nodes = flatten(card)
 		const classes = nodes.map((node) => String(node.props?.className ?? '')).join(' ')
 		assert.ok(classes.includes('wsp-summary'), `摘要卡缺 wsp-summary 外层：${classes}`)
-		assert.ok(classes.includes('wsp-summary-title'), '摘要卡缺标题节点')
 		assert.ok(classes.includes('wsp-summary-desc'), '摘要卡缺说明节点')
-		// 标题必须取 title、说明必须取 summary —— 「拿 description 当标题」正是报障的 bug。
-		assert.ok(requested.includes('title'), `摘要卡的标题没有取 title 字典键，实际取词：${requested.join(', ')}`)
 		assert.ok(requested.includes('summary'), `摘要卡缺 summary 说明，实际取词：${requested.join(', ')}`)
-		// 收起状态下不得渲染完整页面。
-		assert.ok(!classes.includes('wsp-page'), '收起状态下不应渲染完整设置页')
+		// 标题归宿主渲染：摘要里再画一遍就是用户看到的「同名两行」。
+		assert.ok(!requested.includes('title'), `摘要卡不应再取 title 字典键（标题由宿主渲染），实际取词：${requested.join(', ')}`)
+		// 宿主卡片本身是「打开详情」的整卡按钮，里面不能再有第二个可点控件。
+		assert.equal(nodes.filter((node) => node.type === 'button').length, 0, '摘要里不能有按钮：宿主卡片的整卡热区会吃掉它的点击')
+		assert.ok(!classes.includes('wsp-page'), '摘要视图不应渲染完整设置页')
 	})
 })
 
@@ -651,11 +678,65 @@ describe('密钥显示：有内容就看得见（与是否已保存无关）', (
 		assert.equal(save.props.disabled, true, '草稿为空时保存必须禁用，否则会把点阵当成密钥写进去')
 	})
 
-	it('已保存且无草稿时眼睛禁用，并说明原因', () => {
+	it('已保存且无草稿时眼睛**可用**，点它去取一次明文（本次修复）', () => {
+		/*
+		 * 旧契约是「草稿为空 ⇒ 眼睛禁用，提示先输入才能查看明文」。但「已保存」的语义
+		 * 恰恰是草稿为空、输入框只显示点阵——于是保存过的密钥永远看不了，
+		 * 用户报障「保存过的密钥没法点小眼睛显示」。
+		 *
+		 * 新契约：已保存 ⇒ 眼睛可用，点它调用 onRevealStored 向宿主按需取一次明文。
+		 * 这里断言的是**按钮可用且点击会去取值**，而不是「取到的值」——
+		 * 取值路径由路由测试与浏览器验收覆盖。
+		 */
 		const { nodes } = renderPage()
 		const eye = nodes.find((n) => n.type === 'button' && String(n.props.className).includes('wsp-eye'))
-		assert.equal(eye.props.disabled, true, '没有可揭示的内容时眼睛应禁用')
-		assert.equal(eye.props.title, 'keyRevealHint', '应说明「先输入才能查看明文」')
+		assert.equal(eye.props.disabled, false, '已保存的密钥必须能点开查看')
+		assert.equal(eye.props.title, 'keyShowStored', '应提示「查看已保存的密钥」')
+	})
+
+	it('已保存时点击眼睛调用 onRevealStored；有草稿时仍走本地切换', () => {
+		const { mod } = renderPage()
+		/**
+		 * 直接渲染 KeyInput，收集它触发的回调。
+		 * @param {object} overrides - 覆盖的 props。
+		 * @returns {{eye: object, calls: object}} 眼睛节点与调用记录。
+		 */
+		const mount = (overrides) => {
+			const calls = { toggled: 0, revealed: 0 }
+			const element = mod.KeyInput({
+				t: (key) => key,
+				value: '',
+				revealed: false,
+				disabled: false,
+				configured: true,
+				placeholder: 'p',
+				onChange: () => {},
+				onToggle: () => { calls.toggled += 1 },
+				onRevealStored: () => { calls.revealed += 1 },
+				revealing: false,
+				...overrides
+			})
+			const eye = flatten(element).find((node) => node.type === 'button' && String(node.props.className).includes('wsp-eye'))
+			assert.ok(eye !== undefined, '没找到眼睛按钮')
+			return { eye, calls }
+		}
+
+		// 已保存、无草稿 → 点眼睛要去宿主取值
+		const stored = mount({})
+		stored.eye.props.onClick()
+		assert.equal(stored.calls.revealed, 1, '已保存的密钥应触发一次取值')
+		assert.equal(stored.calls.toggled, 0, '已保存时不该只做本地切换')
+
+		// 有草稿 → 点眼睛只是本地切换，不该发请求
+		const drafted = mount({ value: 'tvly-xxx' })
+		drafted.eye.props.onClick()
+		assert.equal(drafted.calls.toggled, 1, '有草稿时应本地切换')
+		assert.equal(drafted.calls.revealed, 0, '有草稿时不该向宿主取值')
+
+		// 未配置且无草稿 → 眼睛禁用
+		const empty = mount({ configured: false })
+		assert.equal(empty.eye.props.disabled, true, '没有可揭示的内容时眼睛应禁用')
+		assert.equal(empty.eye.props.title, 'keyRevealHint')
 	})
 
 	it('保存后不再清空草稿（否则输入框会突然变空）', () => {
@@ -887,5 +968,252 @@ describe('跨版本降级：插槽服务形状漂移时不抛穿（契约 §二.
 			live.includes('experience-plus.item'),
 			'平台再声明后卡片必须回到平台插槽（形状漂移不能让它卡在兜底）'
 		)
+	})
+})
+
+describe('按钮互不串联：一个动作在途时只锁自己那一族控件', () => {
+	/*
+	 * 报障原文：「点按其中一个会导致该页面所有按钮生效」。
+	 *
+	 * 排查结论：按钮并没有真的被一起点击，但页面级 `busy` 让**全页 23 个按钮同时变灰、
+	 * 再同时恢复**，还给同一个绿色提示——视觉上与「全部被触发」无法区分。
+	 * 修复成按动作登记 pending 后，这里锁死三件事：
+	 *   1. 每个按钮都是显式的 type="button"（宿主若把插槽放进 <form>，缺省 type 会
+	 *      让每个按钮都变成 submit，一次点击连带提交整个表单）；
+	 *   2. 某个动作在途时，**别族**的按钮不能跟着变灰；
+	 *   3. 同一族同一行的控件该锁的仍然锁住（不能为了解耦把互斥也拆掉）。
+	 */
+	/**
+	 * 取出页面里所有按钮节点。
+	 * @param {object[]} nodes - 摊平后的节点。
+	 * @returns {object[]} button 节点。
+	 */
+	function buttons(nodes) {
+		return nodes.filter((node) => node.type === 'button')
+	}
+
+	it('每个按钮都显式声明 type="button"，不会被宿主表单当成 submit', () => {
+		const { nodes } = renderPage()
+		const list = buttons(nodes)
+		assert.ok(list.length >= 14, `应渲染出整页按钮，实际 ${String(list.length)} 个`)
+		const missing = list.filter((node) => node.props.type !== 'button')
+		assert.equal(missing.length, 0, `${String(missing.length)} 个按钮没有 type="button"：会在宿主 <form> 里触发整表提交`)
+	})
+
+	it('密钥区在途时，优先级 / 选项 / 接管按钮都保持可用', () => {
+		// 接管前（active:false）的快照：此时「立即接管」本该可用，用它验证解耦。
+		// 优先级只有一项，先把顺序换成两项的固定快照，否则「上移」永远禁用、
+		// 断言会假绿。
+		const snapshot = {
+			...SNAPSHOT,
+			config: { ...SNAPSHOT.config, priority: ['tavily', 'deepseek-official'] },
+			takeover: { ...SNAPSHOT.takeover, active: false, seamProvider: undefined }
+		}
+		const { nodes } = renderPage({ snapshot, pending: { 'key:TAVILY_API_KEY': true } })
+		const list = buttons(nodes)
+		/** 列表里所有该文案的按钮。 */
+		const all = (text) => list.filter((node) => (node.children ?? [])[0] === text)
+		// 首行的「上移」与末行的「下移」按位置本来就被禁用（索引 0 / 末位），
+		// 所以这里断言的是**每一项里至少有一个可用**，避免把位置禁用当成串联。
+		assert.ok(all('moveUp').some((node) => node.props.disabled !== true), '优先级里的「上移」被密钥动作锁住了')
+		assert.ok(all('moveDown').some((node) => node.props.disabled !== true), '优先级里的「下移」被密钥动作锁住了')
+		for (const label of ['save', 'takeoverDo', 'probeRun', 'usageCheck']) {
+			const button = all(label)[0]
+			assert.ok(button !== undefined, `没找到按钮 ${label}`)
+			assert.notEqual(button.props.disabled, true, `${label} 不该被密钥保存动作锁住`)
+		}
+	})
+
+	it('某个密钥槽位在途时，只锁该槽位自己的按钮', () => {
+		// 三槽位快照：第 1 个在途，第 2、3 个的清除/移除应保持可用。
+		const snapshot = {
+			...SNAPSHOT,
+			keys: ['TAVILY_API_KEY', 'TAVILY_API_KEY_2', 'TAVILY_API_KEY_3'].map((ref) => (
+				{ ref, state: 'ready', sticky: false, configured: true, writable: true, cooldownUntil: 0 }))
+		}
+		const { nodes } = renderPage({ snapshot, pending: { 'key:TAVILY_API_KEY': true } })
+		const list = buttons(nodes)
+		const clears = list.filter((node) => (node.children ?? [])[0] === 'keyClear')
+		const removes = list.filter((node) => (node.children ?? [])[0] === 'removeKey')
+		assert.equal(clears.length, 3, `应有 3 个「清除密钥」按钮，实际 ${String(clears.length)}`)
+		assert.equal(removes.length, 3, `应有 3 个「移除」按钮，实际 ${String(removes.length)}`)
+		assert.equal(clears[0].props.disabled, true, '在途槽位的清除按钮应锁住')
+		assert.notEqual(clears[1].props.disabled, true, '第 2 槽位的清除按钮不该被第 1 槽位锁住')
+		assert.notEqual(clears[2].props.disabled, true, '第 3 槽位的清除按钮不该被第 1 槽位锁住')
+		assert.notEqual(removes[1].props.disabled, true, '第 2 槽位的移除按钮不该被第 1 槽位锁住')
+	})
+
+	it('保存密钥在途只锁本槽位的输入框与保存按钮，别的槽位照常可编辑', () => {
+		const snapshot = {
+			...SNAPSHOT,
+			keys: ['TAVILY_API_KEY', 'TAVILY_API_KEY_2'].map((ref) => (
+				{ ref, state: 'ready', sticky: false, configured: true, writable: true, cooldownUntil: 0 }))
+		}
+		const { nodes } = renderPage({
+			snapshot,
+			pending: { 'key:TAVILY_API_KEY': true },
+			drafts: { TAVILY_API_KEY: 'a', TAVILY_API_KEY_2: 'b' }
+		})
+		const inputs = nodes.filter((node) => node.type === 'input' && node.props.type === 'password')
+		assert.equal(inputs.length, 2, `应有两个密钥输入框，实际 ${String(inputs.length)}`)
+		assert.equal(inputs[0].props.disabled, true, '在途槽位的输入框应锁住')
+		assert.notEqual(inputs[1].props.disabled, true, '另一槽位的输入框不该被连带锁住')
+		const saves = buttons(nodes).filter((node) => (node.children ?? [])[0] === 'keySave')
+		assert.equal(saves[0].props.disabled, true, '在途槽位的保存按钮应锁住')
+		assert.notEqual(saves[1].props.disabled, true, '另一槽位的保存按钮不该被连带锁住')
+	})
+
+	it('试一次搜索在途时，接管 / 交还 / 查额度都不受牵连', () => {
+		// 接管前快照：「立即接管」本应可用、「交还」本应禁用——禁用理由只能是自身的
+		// active 状态，不能是「试搜正在跑」。
+		const snapshot = { ...SNAPSHOT, takeover: { ...SNAPSHOT.takeover, active: false, seamProvider: undefined } }
+		const { nodes } = renderPage({ snapshot, pending: { probe: true } })
+		const list = buttons(nodes)
+		/** 按文案取按钮。 */
+		const byText = (text) => list.find((node) => (node.children ?? [])[0] === text)
+		const probe = byText('probing')
+		assert.ok(probe !== undefined, '在途时「试一次搜索」应显示 probing 文案')
+		assert.equal(probe.props.disabled, true, '在途的按钮自己要锁住')
+		for (const label of ['takeoverDo', 'usageCheck']) {
+			const button = byText(label)
+			assert.ok(button !== undefined, `没找到按钮 ${label}`)
+			assert.notEqual(button.props.disabled, true, `${label} 不该被「试一次搜索」锁住`)
+		}
+	})
+})
+
+describe('接管状态与配置提醒必须同源、不自相矛盾', () => {
+	/*
+	 * 报障原文：「圈出来的『已接管』和『配置提醒』是否冲突」。
+	 *
+	 * 真实缺陷：`routes.js` 读的是 `ctx.web.searchProviderId`，而宿主的 `WebRuntime`
+	 * 根本没有这个属性 —— 取值只经由 `config.searchProvider.get()`（volatile
+	 * 访问器，`$DSH_WEB_SEARCH_PROVIDER` 是同一字段的覆盖）。于是永远读到
+	 * `undefined`，快照报 `active: false` + 「配置有歧义」，
+	 * 而 profile 里明明写着 `searchProvider: web-search-plus`、搜索实际跑在链上。
+	 *
+	 * 下面两条从**两侧**夹住这个 bug：
+	 *   1. 宿主真实形状（只有 config 访问器）⇒ active 为真、无歧义告警；
+	 *   2. 宿主没配置（访问器返回 undefined）⇒ 才允许报「有歧义」。
+	 * 缺了第 1 条，测试会继续认可一个宿主不存在的属性。
+	 */
+	/**
+	 * 用真实 seam 形状跑一次快照。
+	 * @param {string|undefined} configured - 宿主 config.searchProvider 的值。
+	 * @param {string[]} registered - 注册表里的提供方 id。
+	 * @returns {Promise<object>} 快照。
+	 */
+	async function snapshotWith(configured, registered = ['deepseek-official', 'deepseek-search-api', 'web-search-plus']) {
+		const { createRouter } = await import('../lib/routes.js')
+		const providers = new Map(registered.map((id) => [id, {}]))
+		const ctx = {
+			web: {
+				searchProviders: providers,
+				config: { searchProvider: { get: () => configured }, fetchProvider: { get: () => 'http' } }
+			},
+			get: () => undefined
+		}
+		const handle = createRouter({
+			ctx,
+			readState: () => ({
+				config: {
+					priority: ['tavily', 'deepseek-official'],
+					tavilyKeyRefs: [],
+					tavilyBaseURL: 'https://api.tavily.com',
+					tavilyMaxResults: 8,
+					tavilySearchDepth: 'basic',
+					tavilyIncludeAnswer: true,
+					tavilyTimeoutMs: 30000,
+					tavilyRateLimitCooldownMs: 60000
+				},
+				warnings: []
+			}),
+			tavily: {},
+			keyRing: { sync() {}, snapshot: () => [] },
+			chain: { describe: () => ({ chain: [] }) },
+			version: () => '0.1.0'
+		})
+		const res = {
+			writeHead() {},
+			end(body) { this.body = JSON.parse(body) }
+		}
+		await handle({ url: '/api/dsh-web-search-plus', method: 'GET', headers: { host: '127.0.0.1:3124' }, socket: { remoteAddress: '127.0.0.1' }, on() {} }, res)
+		return res.body
+	}
+
+	it('宿主已配置成本插件时，必须报「已接管」且不得再报「配置有歧义」', async () => {
+		const snap = await snapshotWith('web-search-plus')
+		assert.equal(snap.takeover.active, true, '宿主已指定 web-search-plus，快照却报未接管')
+		assert.equal(snap.takeover.seamProvider, 'web-search-plus', '没有把宿主配置的提供方 id 读回来')
+		assert.equal(snap.takeover.ambiguous, false, '已显式配置时不该再判为「有歧义」')
+		assert.deepEqual(snap.warnings, [], `已接管时不应有「未指定用哪个」的提醒，实际：${JSON.stringify(snap.warnings)}`)
+	})
+
+	it('宿主确实没配置且多个提供方并存时，才报「配置有歧义」', async () => {
+		const snap = await snapshotWith(undefined)
+		assert.equal(snap.takeover.active, false)
+		assert.equal(snap.takeover.ambiguous, true, '无显式配置且多提供方时必须报歧义')
+		assert.equal(snap.warnings.length, 1, '歧义状态必须有一条可执行提醒')
+		assert.match(snap.warnings[0], /搜索提供方/, '提醒要说明是搜索提供方的问题')
+	})
+
+	it('只剩一个提供方时，未显式配置也不算歧义', async () => {
+		const snap = await snapshotWith(undefined, ['web-search-plus'])
+		assert.equal(snap.takeover.ambiguous, false, '唯一可用提供方时宿主会自动选中，不该报歧义')
+	})
+
+	it('环境变量 DSH_WEB_SEARCH_PROVIDER 与配置字段等价', async () => {
+		const previous = process.env.DSH_WEB_SEARCH_PROVIDER
+		process.env.DSH_WEB_SEARCH_PROVIDER = 'web-search-plus'
+		try {
+			const snap = await snapshotWith(undefined)
+			assert.equal(snap.takeover.active, true, '环境变量是同一字段的覆盖，应视为已接管')
+		} finally {
+			if (previous === undefined) delete process.env.DSH_WEB_SEARCH_PROVIDER
+			else process.env.DSH_WEB_SEARCH_PROVIDER = previous
+		}
+	})
+})
+describe('点击后的布局稳定性：提示行必须常驻占位，不能撑高再收回', () => {
+	/*
+	 * 报障：「点【保存选项】的一瞬间会变成【保存中…】，原本只作用当前点击 UI，
+	 * 但整个 UI 会随着闪一下」。
+	 *
+	 * 逐帧实测（requestAnimationFrame）：状态卡高度 1206 → 1236 跳两次，
+	 * 全页 `:disabled` 9 → 20 → 9。成因之一是提示行按「有则渲染、无则摘除」：
+	 * 操作一开始 `setMessage(undefined)` 把这一行摘掉，成功后连同新文案重新挂上，
+	 * 卡片随之长高再变矮，下方所有内容跟着位移——就是那一下「闪」。
+	 *
+	 * 现在的契约：提示**容器**始终渲染（类名含 wsp-note-slot、保留一行高度），
+	 * 只有里面的文字随消息变化。这条断言锁住「容器常驻」，防止有人再写成条件渲染。
+	 */
+	/**
+	 * 取状态卡里的提示槽位节点。
+	 * @param {object[]} nodes - 摊平后的节点。
+	 * @returns {object[]} 带 wsp-note-slot 的节点。
+	 */
+	function noteSlots(nodes) {
+		return nodes.filter((node) => String(node.props.className ?? '').split(/\s+/).includes('wsp-note-slot'))
+	}
+
+	it('没有消息时，提示容器依然存在（空行占位）', () => {
+		const { nodes } = renderPage()
+		const slots = noteSlots(nodes)
+		assert.equal(slots.length, 1, `应始终有一个提示槽位，实际 ${String(slots.length)} 个`)
+		assert.equal(slots[0].props['aria-live'], 'polite', '提示槽位要能播报，但不能每帧打扰读屏')
+	})
+
+	it('有消息时，复用同一个槽位而不是额外新增一行', () => {
+		const { nodes } = renderPage()
+		const slots = noteSlots(nodes)
+		assert.equal(slots.length, 1, '有消息时也不该多出第二个提示节点——多一个就会撑高卡片')
+	})
+
+	it('提示槽位不携带色调类名时表示「无消息」', () => {
+		const { nodes } = renderPage()
+		const slot = noteSlots(nodes)[0]
+		const classes = String(slot.props.className ?? '').split(/\s+/)
+		assert.ok(!classes.some((name) => ['wsp-note-ok', 'wsp-note-err', 'wsp-note-warn'].includes(name)),
+			'无消息时空槽位不该带色调类名（会让空行看起来像一条状态）')
 	})
 })

@@ -33,6 +33,8 @@ function fakeRequest(method, url, body) {
 	return {
 		method,
 		url,
+		// 与真实浏览器一致：回环 Host + 写操作用 JSON（来源校验的两道判据）。
+		headers: { host: '127.0.0.1:3124', ...(method === 'GET' ? {} : { 'content-type': 'application/json' }) },
 		socket: { remoteAddress: '127.0.0.1' },
 		on(event, handler) {
 			listeners.set(event, handler)
@@ -87,7 +89,8 @@ function boot(options = {}) {
 	const ctx = {
 		web: {
 			searchProviders: new Map([['deepseek-official', deepSeek]]),
-			searchProviderId: options.seamProvider ?? 'web-search-plus',
+			/* 宿主真实形态：取值经由 config.searchProvider 的 volatile 访问器，没有 searchProviderId 属性。 */
+			config: { searchProvider: { get: () => options.seamProvider ?? 'web-search-plus' }, fetchProvider: { get: () => 'http' } },
 			registerSearchProvider(provider) {
 				registered.set(provider.id, provider)
 				return () => registered.delete(provider.id)

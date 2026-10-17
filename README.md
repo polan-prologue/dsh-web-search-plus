@@ -1,159 +1,132 @@
-# 网页搜索++（dsh-web-search-plus）
+# dsh-web-search-plus
 
-为 DSH 的联网搜索提供**提供方优先级**：在 **Tavily 第三方搜索** 与 **DeepSeek 原生搜索** 之间自由排序，前一个失败时自动回退到下一个；Tavily 侧可配置**多个密钥**自动轮换，用来分摊免费版的每日额度上限。
+English | [中文](README.zh.md)
 
-**项目地址**：<https://github.com/polan-prologue/dsh-web-search-plus> · **许可证**：[MIT](LICENSE)
+[![npm](https://img.shields.io/npm/v/dsh-web-search-plus)](https://www.npmjs.com/package/dsh-web-search-plus)
+[![stars](https://img.shields.io/github/stars/polan-prologue/dsh-web-search-plus?style=flat)](https://github.com/polan-prologue/dsh-web-search-plus)
 
----
+Provider **priority** for DeepSeek Harness web search: put Tavily and the native DeepSeek
+provider in whatever order you want, fall through to the next one when the first fails, and
+rotate several Tavily keys to spread the free daily quota.
 
-## 快速开始
+## Install
 
-```powershell
-# 从 GitHub 安装（推荐：锁定 tag，升级由你决定）
-dsh plugin --profile desktop add github:polan-prologue/dsh-web-search-plus#v0.1.0
-
-# 从本地目录安装（二次开发时用这个）
-dsh plugin --profile desktop add <插件目录>
+```sh
+dsh plugin --profile desktop add dsh-web-search-plus
 ```
 
-装完**刷新一次浏览器页面**，客户端半侧才会出现；然后按下面「使用」一节点「立即接管」。
+Refresh the browser once, then open **Plugins → 网页搜索++** and press **Take over**.
 
-> 本插件需要 **Tavily 密钥**才能走 Tavily 那条搜索线。密钥只写入你自己的 DSH 凭据域，
-> **不进本仓库、不进日志**；没有密钥时它会如实报「未配置」，并按优先级回退到 DeepSeek 原生搜索。
+Pinned tag instead of the npm release:
 
----
+```sh
+dsh plugin --profile desktop add github:polan-prologue/dsh-web-search-plus#v0.1.2
+```
 
-## 为什么需要这个插件
+**Requires dsh 0.1.0 or newer.** The plugin talks to the `ctx.web` seam and the `webServer`
+prefix routes; on an older host it registers nothing and says why in the log.
 
-DSH 的联网搜索统一走 `ctx.web` seam，而 seam 只支持「按 id 固定**一个**提供方」：
+## Why this exists
 
-| 情况 | seam 的行为 |
+The `ctx.web` seam selects **exactly one** provider by id:
+
+| State | What the seam does |
 |---|---|
-| 配置了提供方 id | 只用它，失败即失败 |
-| 未配置 id，恰好一个可用 | 用它 |
-| 未配置 id，多个可用 | 直接报 `WEB_PROVIDER_AMBIGUOUS` |
+| A provider id is configured | Uses only that one; failure is failure |
+| No id, exactly one provider usable | Uses it |
+| No id, several usable | Throws `WEB_PROVIDER_AMBIGUOUS` |
 
-也就是说，seam 本身**没有优先级链**。本插件向 seam 注册**一个**提供方 `web-search-plus`，由它在内部按你配置的顺序依次尝试真正的后端：
+There is no priority chain and no fallback. This plugin registers **one** provider
+(`web-search-plus`) and runs the chain inside it:
 
 ```
-web_search 工具
-   └─ ctx.web（固定指向 web-search-plus）
-        └─ 网页搜索++ 优先级链
-             1. Tavily 搜索（多密钥轮换：K1 → K2 → …）
-             2. DeepSeek 原生搜索（deepseek-official）
+web_search tool
+   └─ ctx.web (pinned to web-search-plus)
+        ├─ 1. Tavily            → rotates across your key slots
+        └─ 2. DeepSeek native   → reuses the official provider instance
 ```
 
-DeepSeek 节点**复用官方提供方实例**，所以它的密钥、账号令牌、接口地址与搜索次数上限继续沿用官方「设置 → 插件 → 网页搜索」页的配置，本插件不重复实现一份会与上游漂移的调用逻辑。
+The DeepSeek node calls the **official provider instance** rather than re-implementing it, so
+its key, account token, endpoint and usage limits keep coming from **Settings → Web search** —
+nothing drifts when upstream changes.
 
-## 安装
+## What you get
 
-它需要作为**组合包**装入 profile。先确定你自己的插件目录（克隆或解压出来的、里面有
-`package.json` 的那一层），下文用 `<插件目录>` 代指：
+- **Ordered fallback** — move the two providers up and down; the first one that answers wins, the next runs when the previous fails or (optionally) returns nothing
+- **Multi-key rotation** — up to 20 Tavily key slots. A rate-limited (`429`) or quota-exhausted key cools down and the chain moves to the next one automatically; each slot shows its live state (`ready` / `invalid` / `cooling down`) and the one in use is marked
+- **Per-key usage** — ask Tavily for each slot's current plan usage in one click, so you can see which key is nearly spent before a search fails
+- **Hand back cleanly** — *Hand back to official search* writes `deepseek-official` back to the `web` row and the chain stops being consulted. The *Try one search* probe follows the same state, so it never claims the chain ran while the seam points somewhere else
+- **Secrets stay in the credential domain** — keys are written through `ctx.credentials`, never to the settings file, never into a snapshot response, never into a log. Saved keys can be revealed on request with the eye button, which asks the host for exactly one slot over a loopback-only, no-store route
+- **No surprises on the page** — an action locks only its own control group; the 1 s cooldown ticker does not repaint the cards; the note line keeps its height so cards do not shift when a message appears
+- **Bilingual UI** — follows the interface language (`zh` / `en`)
 
-```powershell
-# 把 <插件目录> 换成你自己的绝对路径，例如 %USERPROFILE%\plugins\dsh-web-search-plus
-dsh plugin --profile desktop add <插件目录>
-```
+## Manage it from the Plugins page
 
-也可以从 GUI 的「插件」页安装，spec 填你自己的插件目录绝对路径。安装后 shell 会加载它；**首次需要刷新一次浏览器页面**，客户端半侧才会出现。
+The settings card lives in **Plugins → 网页搜索++**, and falls back to the kernel
+**Built-in plugins** page when the experience platform is absent. Four cards:
 
-## 使用
-
-打开 **侧栏 → 插件 → 官方分组 → 「网页搜索++」**（就在官方「网页搜索」卡片旁边）。
-
-1. **使用优先级**：用「上移 / 下移」调整顺序。默认是 `Tavily → DeepSeek`。
-2. **接管**：点「立即接管」。这一步把 profile 里 `web` 行的 `searchProvider` 指向 `web-search-plus`——**没有这一步，优先级不会生效**，页面会以红色提示如实告诉你当前没接管。
-3. **Tavily 密钥**：
-   - 「添加密钥槽位」增加一个槽位（凭据名依次为 `TAVILY_API_KEY`、`TAVILY_API_KEY_2`……，也可以自定义成任意合法的环境变量名）；
-   - 在每个槽位填入密钥后点「保存密钥」；
-   - 密钥只写入凭据域（`$DSH_HOME/.credentials.yaml`），**不写入设置文件，也绝不出现在任何响应里**；
-   - 「检测各密钥额度」会逐个查询 Tavily `/usage`，显示每个密钥的已用量与上限。
-4. **试一次搜索**：真跑一次搜索，并展示本次实际经过了哪些节点、命中哪一个——用来确认优先级确实按你的设置在工作。
-5. **重置冷却**：手动清除所有密钥的冷却与失效标记。
-
-## 优先级与回退的实际行为
-
-| 场景 | 结果 |
+| Card | What it does |
 |---|---|
-| Tavily 成功 | 直接返回，不触碰 DeepSeek |
-| Tavily 首选密钥限流 / 额度耗尽 | 自动改用下一个可用密钥 |
-| Tavily 某个密钥无效（401） | 该密钥本次运行内标记失效，改用下一个 |
-| Tavily 全部密钥失败 | 回退到链上下一个节点（如 DeepSeek 原生） |
-| 链上每个节点都失败 | 抛 `WEB_SEARCH_CHAIN_EXHAUSTED`，消息逐条列出每个节点的失败原因 |
-| 你在设置页取消了当前搜索 | 立即中止，**不**回退（回退只针对提供方自身的失败） |
-| 首选节点返回 0 结果 | 默认视为有效答案；打开 `fallbackOnEmpty` 后改为继续下一个节点 |
+| Priority | Reorder the chain; one switch decides whether the chain is consulted at all |
+| Tavily keys | Key slots, per-slot state, reveal / save / clear / remove, add slot, reset cooldowns |
+| Tavily options | Endpoint, search depth, result cap, timeout, rate-limit cooldown, answer summary |
+| Status | Takeover state, chain availability, run one probe, fetch per-key usage |
 
-### 密钥状态的错误分类
+## How the chain actually behaves
 
-分类依据实测的 Tavily 行为，而不是 HTTP 语义的教科书含义：
+| Situation | Result |
+|---|---|
+| First node answers | Its result is returned; later nodes are not called |
+| First node throws | Reason is recorded, next node runs |
+| Node is not registered | Recorded as *not registered*, next node runs |
+| Caller cancels | Propagates immediately — cancellation does **not** fall through |
+| Every node fails | `WEB_SEARCH_CHAIN_EXHAUSTED`, one line per node with its reason |
 
-| 状态码 | 含义 | 动作 |
+With `fallbackOnEmpty` on, an **empty** result counts as a failure and the chain continues; off,
+an empty result is a legitimate answer.
+
+## Security
+
+- Management routes accept **loopback only**, and additionally require a loopback `Host`, a same-origin `Origin` when present, a non-`cross-site` `Sec-Fetch-Site`, and `application/json` on writes — so a page in your browser cannot read your keys even though these routes sit outside the host's session auth
+- Key values are write-only in every listing: `GET` never contains a secret
+- The reveal route returns **one** slot per request, carries `no-store`, refuses refs that are not configured, and is never called automatically
+- The publish step runs `tools/scan-sensitive.mjs`, which blocks API-key shapes, private keys, connection strings, personal paths and session ids
+
+## Configuration
+
+Every option lives in the plugin row of your profile's `cordis.patch.yml` and is editable from
+the page:
+
+| Key | Default | Meaning |
 |---|---|---|
-| 401 / 403 | 该密钥无效 | 标记失效，换下一个 |
-| 429 | 该密钥限流 | 按冷却时长（默认 60 秒，或响应里的 `Retry-After`）冷却 |
-| 432 / 433 | 该密钥额度/套餐上限用尽 | 冷却（默认到次日零点） |
-| 400 | 该密钥不接受此次请求（如查询过短） | 换下一个密钥 |
-| 422 | 请求体不符合接口 schema | 不轮换，直接上抛——换密钥不会让非法请求变合法 |
-| 5xx / 网络错误 | 上游临时故障 | 换下一个密钥 |
+| `priority` | `[tavily, deepseek-official]` | Chain order |
+| `tavilyKeyRefs` | `[TAVILY_API_KEY]` | Credential refs, in rotation order |
+| `tavilyBaseURL` | `https://api.tavily.com` | Endpoint (`/search` and `/usage` are appended) |
+| `tavilyMaxResults` | `8` | Results per search (1–20) |
+| `tavilySearchDepth` | `basic` | `basic` / `fast` / `ultra-fast` / `advanced` |
+| `tavilyIncludeAnswer` | `true` | Ask Tavily for an LLM answer summary |
+| `tavilyTimeoutMs` | `30000` | Per-request timeout |
+| `tavilyRateLimitCooldownMs` | `60000` | Cooldown after a `429` |
+| `fallbackOnEmpty` | `false` | Treat an empty result as a failure |
 
-> 实测数据：无效密钥 + 正常查询 → `401`；有效密钥 + 单字符查询 → `400`。因此 400 归入「可轮换」。
+## Development
 
-## 配置项
-
-全部字段都是 volatile 字段，可以直接在插件页改，也可以写进 profile 的 `cordis.patch.yml`：
-
-| 字段 | 默认值 | 含义 |
-|---|---|---|
-| `priority` | `[tavily, deepseek-official]` | 提供方尝试顺序 |
-| `tavilyKeyRefs` | `[TAVILY_API_KEY]` | 密钥槽位的凭据引用名（最多 20 个） |
-| `tavilyBaseURL` | `https://api.tavily.com` | Tavily 接口地址 |
-| `tavilyMaxResults` | `8` | 单次结果上限（1–20） |
-| `tavilySearchDepth` | `basic` | `basic` / `fast` / `ultra-fast` / `advanced`（advanced 消耗 2 倍额度） |
-| `tavilyIncludeAnswer` | `true` | 是否请求摘要答案（映射为结果的 `content`） |
-| `tavilyTimeoutMs` | `30000` | 单次请求超时 |
-| `tavilyRateLimitCooldownMs` | `60000` | 429 后的冷却时长；`0` 表示不自动恢复 |
-| `tavilyQuotaCooldownMs` | `0` | 432/433 后的冷却时长；`0`（默认）表示额度耗尽后保持冷却，仅手动重置可恢复 |
-| `fallbackOnEmpty` | `false` | 0 结果时是否继续下一个节点 |
-
-## 交还与恢复
-
-- 插件页的「**交还官方搜索**」会把 `web` 行的 `searchProvider` 改写为**显式** `deepseek-official`，即回到官方搜索。
-  > 为什么不是"删掉覆盖"：seam 只有在「显式指定了提供方」或「注册表里恰好只有一个可用提供方」时才不歧义。本插件始终把自己注册进注册表，一旦删掉字段就会变成「两个可用提供方 + 无显式选择」，宿主抛 `WEB_PROVIDER_AMBIGUOUS`，**联网搜索彻底不可用**——而且接口仍返回 `ok=true`，只有真正搜索时才暴露。写回显式 id 才能同时满足"用官方搜索"和"不歧义"。
-- 快照里的 `takeover.ambiguous` 会标出这种歧义状态，界面上也会明确提示「搜索当前不可用」，不会假装成"自动选择"。
-- 也可以手工编辑 profile 的 `cordis.patch.yml`，把 `id: web` 那个覆盖块的 `searchProvider` 改成 `deepseek-official`。
-  该文件在 `%DSH_HOME%\profiles\<profile 名>\cordis.patch.yml`；`%DSH_HOME%` 默认是 `%USERPROFILE%\.dsh`
-  （PowerShell 里等价写法：`Join-Path $env:USERPROFILE '.dsh\profiles\desktop\cordis.patch.yml'`，
-  设过 `$env:DSH_HOME` 时以它为准）。不想找文件就直接在上面的插件页点「交还官方搜索」。
-- 卸载插件：`dsh plugin --profile desktop remove dsh-web-search-plus`。
-
-> 注意：profile patch 是**按 id 整体替换**、不做深度合并。所以接管时必须重述 `fetchProvider: http`，插件已经这么做了；手工编辑时也请保留它。
-
-## 开发
-
-> 完整的故障档案见 **[docs/开发踩坑记录.md](docs/开发踩坑记录.md)** —— 按「环境搭建 / 骨架接线 / schema / 宿主契约 / 开发调试 / 测试关卡 / 打包发布 / 端到端验收」组织，每条给出**现象 / 原因 / 解决 / 证据**。接手前建议先读第十节「一页速查」。
-
-```powershell
-# 单元测试（纯逻辑，不需要网络与密钥）
-node --test "tests/*.test.mjs"
-
-# 真实联网验收（需要真实密钥）
-$env:DSH_WSP_TEST_KEY='tvly-xxx'; node tests/live-check.mjs
+```sh
+npm test          # 238 unit tests, no network, no keys
+npm run test:live # real search against a real key
 ```
 
-| 模块 | 职责 |
-|---|---|
-| `lib/errors.js` | 稳定错误码；`WebError` 的动态导入与本地回退 |
-| `lib/config.js` | 配置词汇与归一化（纯函数） |
-| `lib/schema.js` | schemastery Config 与 volatile 字段读取 |
-| `lib/tavily.js` | `KeyRing`（多密钥的粘滞选择、失效与冷却状态机）、Tavily 调用、响应映射、错误分类 |
-| `lib/chain.js` | 优先级链式提供方（注册进 `ctx.web` 的那一个） |
-| `lib/routes.js` | `/api/dsh-web-search-plus` 管理路由族 |
-| `lib/index.js` | 宿主入口：装配 provider、路由与设置页策略 |
-| `lib/client.js` | 浏览器半侧：插件页卡片与设置页面 |
+Layout: `lib/index.js` (host entry) · `lib/chain.js` (the chain) · `lib/tavily.js` (Tavily node
++ key ring) · `lib/routes.js` (management routes) · `lib/client.js` (browser half) ·
+`lib/schema.js` (config) · `docs/开发踩坑记录.md` (pitfall log).
 
-## 已知限制
+## Known limits
 
-- **`web_fetch` 不走本插件**：链式提供方只接管搜索；抓取仍是 `http` 提供方。
-- **依赖官方提供方实例**：DeepSeek 节点从 `ctx.web` 的注册表按 id `deepseek-official` 取实例。若官方行被禁用，该节点会被标记为「未注册」并跳过（页面会如实显示），而不是静默出错。
-- **管理接口只接受本机请求**：非回环地址一律 403。
-- **Tavily 免费版可能不上报 `plan_limit`**：此时「检测额度」显示「未报告上限」，轮换策略不依赖该值，只依赖实际错误码。
+- Tavily's free tier is metered **per account**, so several keys only help when they come from different accounts
+- `advanced` depth costs twice the credits
+- The seam still selects one provider id; this plugin *is* that one provider — the ordering is its internal logic, not a seam feature
+- Changing the `web` row's provider needs a host restart on some builds; the page says so instead of pretending
+
+## License
+
+[MIT](LICENSE)

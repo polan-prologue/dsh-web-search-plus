@@ -13,12 +13,27 @@ import { KeyRing, TavilySearchProvider } from '../lib/tavily.js'
 import { ChainSearchProvider } from '../lib/chain.js'
 
 /** 造一个最小的假请求对象。 */
-function fakeRequest(method, url, body, remoteAddress = '127.0.0.1') {
+function fakeRequest(method, url, body, remoteAddress = '127.0.0.1', headers) {
 	const listeners = new Map()
 	const payload = body === undefined ? '' : JSON.stringify(body)
+	/*
+	 * 默认头必须与「浏览器里插件页自己发请求」一致：
+	 * - `host` 是回环地址（来源校验第一关）；
+	 * - 写操作带 `content-type: application/json`（第三关）。
+	 *
+	 * 早先这里完全没有 headers，来源校验一上线就所有用例集体 403——
+	 * 说明夹具比真实请求宽松（真实浏览器永远会带 Host）。
+	 * 需要构造恶意请求的用例通过第 5 个参数显式覆盖。
+	 */
+	const merged = {
+		host: '127.0.0.1:3124',
+		...(method === 'GET' ? {} : { 'content-type': 'application/json' }),
+		...headers
+	}
 	return {
 		method,
 		url,
+		headers: merged,
 		socket: { remoteAddress },
 		on(event, handler) {
 			listeners.set(event, handler)
@@ -102,15 +117,25 @@ function makeRouter(options = {}) {
 			if (entry.options.id === 'web') {
 				const next = change({ fetchProvider: 'http' }, { searchProvider: 'deepseek-official', fetchProvider: 'http' })
 				state.editedWeb.push(next)
-				ctx.web.searchProviderId = next.searchProvider
+				seam.value = next.searchProvider
 				return
 			}
 			state.persisted.push({ ns: entry.options.id, change })
 		}
 	}
 
+	const seam = { value: options.seamProvider ?? 'web-search-plus' }
 	const ctx = {
-		web: { searchProviders: registry, searchProviderId: options.seamProvider ?? 'web-search-plus' },
+		web: {
+			searchProviders: registry,
+			/*
+			 * seam 的真实形态：取值只经由 ctx.web.config.searchProvider 的 volatile
+			 * 访问器（见 @deepseek-ai/dsh-web 的 WebRuntime.search()）。必须照抄这个
+			 * 形状——旧夹具伪造了宿主根本不存在的 searchProviderId 属性，于是
+			 * 「读到 undefined → 误报未接管」这个真实 bug 在测试里永远是绿的。
+			 */
+			config: { searchProvider: { get: () => seam.value }, fetchProvider: { get: () => 'http' } }
+		},
 		get: (name) => {
 			if (name === 'credentials') return options.noCredentials === true ? undefined : {
 				describe: async (ref) => ({ configured: state.credentials[ref] !== undefined, source: 'file', writable: true }),
@@ -155,7 +180,7 @@ function makeRouter(options = {}) {
 		chain,
 		version: () => '9.9.9'
 	})
-	return { handler, state, keyRing, ctx }
+	return { handler, state, keyRing, ctx, seam }
 }
 
 /**
@@ -202,6 +227,98 @@ describe('路由：访问控制', () => {
 	})
 })
 
+describe('路由：来源校验（挡浏览器里的恶意页面）', () => {
+	/*
+	 * 实测背景（加这层之前三条全部成立）：
+	 * 插件路由不经过宿主会话鉴权（宿主接口 401，插件接口 200），于是 isLoopback()
+	 * 只能证明「请求来自本机进程」，挡不住用户浏览器里**任意页面**的 fetch。
+	 *
+	 * 每条用例都是当时真实打通的攻击路径，现在必须 403。
+	 */
+	/**
+	 * 发一个请求并带上伪造的头。
+	 * @param {object} harness - 路由夹具。
+	 * @param {string} method - 方法。
+	 * @param {string} path - 子路径。
+	 * @param {object} body - 请求体。
+	 * @param {object} headers - 覆盖的头。
+	 * @returns {Promise<object>} 响应。
+	 */
+	async function callWith(harness, method, path, body, headers) {
+		const suffix = path.length === 0 || path.startsWith('/') ? path : '/' + path
+		const res = fakeResponse()
+		await harness.handler(fakeRequest(method, ROUTE_PREFIX + suffix, body, '127.0.0.1', headers), res)
+		return res
+	}
+
+	it('伪造 Host（DNS rebinding）被拒绝，且不回显密钥', async () => {
+		const harness = makeRouter({ credentials: { TAVILY_API_KEY: 'tvly-secret-xyz' } })
+		const res = await callWith(harness, 'POST', 'keys/value/reveal', { ref: 'TAVILY_API_KEY' }, { host: 'evil.example.com' })
+		assert.equal(res.captured.status, 403)
+		assert.ok(!String(res.captured.body).includes('tvly-secret-xyz'), '拒绝响应里泄漏了明文')
+	})
+
+	it('跨源 Origin 被拒绝', async () => {
+		const harness = makeRouter({})
+		const res = await callWith(harness, 'POST', 'keys/value/reveal', { ref: 'TAVILY_API_KEY' }, { origin: 'https://evil.example.com' })
+		assert.equal(res.captured.status, 403)
+	})
+
+	it('同源 Origin 放行（页面自己调自己）', async () => {
+		const harness = makeRouter({})
+		const res = await callWith(harness, 'GET', '', undefined, { origin: 'http://127.0.0.1:3124' })
+		assert.equal(res.captured.status, 200)
+	})
+
+	it('跨站 text/plain POST 被拒绝（CORS 简单请求免预检的那条路）', async () => {
+		const harness = makeRouter({ credentials: { TAVILY_API_KEY: 'tvly-secret-xyz' } })
+		const res = await callWith(harness, 'POST', 'keys/value/reveal', { ref: 'TAVILY_API_KEY' }, { 'content-type': 'text/plain' })
+		assert.equal(res.captured.status, 403)
+		assert.ok(!String(res.captured.body).includes('tvly-secret-xyz'), '简单请求路径泄漏了明文')
+	})
+
+	it('form-urlencoded 同样被拒绝', async () => {
+		const harness = makeRouter({})
+		const res = await callWith(harness, 'POST', 'keys/value', { ref: 'TAVILY_API_KEY', value: 'x' }, { 'content-type': 'application/x-www-form-urlencoded' })
+		assert.equal(res.captured.status, 403)
+	})
+
+	it('本机脚本（无 Origin、带 JSON）照常可用', async () => {
+		// 这一条保证我们没把正常的本地工具链一起挡掉。
+		const harness = makeRouter({})
+		const res = await callWith(harness, 'POST', 'keys/reset', {}, {})
+		assert.equal(res.captured.status, 200)
+	})
+
+	it('sec-fetch-site: cross-site 被拒绝（不依赖 Host 白名单的纵深判据）', async () => {
+		/*
+		 * 这条与 Host 白名单**故意重复**：白名单若哪天被放宽（远程访问、改监听地址），
+		 * 这条仍然拦得住跨站请求。宿主 isTrustedApiRequest 也有同一判据。
+		 */
+		const harness = makeRouter({ credentials: { TAVILY_API_KEY: 'tvly-secret-xyz' } })
+		const res = await callWith(harness, 'POST', 'keys/value/reveal', { ref: 'TAVILY_API_KEY' }, {
+			'sec-fetch-site': 'cross-site'
+		})
+		assert.equal(res.captured.status, 403)
+		assert.ok(!String(res.captured.body).includes('tvly-secret-xyz'), '跨站标记路径泄漏了明文')
+	})
+
+	it('同源页面（same-origin）与非浏览器客户端（无该头）都放行', async () => {
+		const harness = makeRouter({})
+		const sameOrigin = await callWith(harness, 'GET', '', undefined, { 'sec-fetch-site': 'same-origin' })
+		assert.equal(sameOrigin.captured.status, 200, '同源页面不能被误伤')
+		// curl / 脚本根本不发 sec-fetch-site，必须照常可用。
+		const script = await callWith(harness, 'GET', '', undefined, {})
+		assert.equal(script.captured.status, 200, '无 sec-fetch-site 的客户端（curl）不能被误伤')
+	})
+
+	it('来源校验先于路由解析：未知路径的伪造请求也是 403 而不是 404', async () => {
+		// 顺序很重要——先挡来源，避免用 404/405 的差异去探测有哪些端点。
+		const harness = makeRouter({})
+		const res = await callWith(harness, 'POST', 'nonexistent', {}, { host: 'evil.example.com' })
+		assert.equal(res.captured.status, 403)
+	})
+})
 describe('路由：快照', () => {
 	it('返回配置、链路、密钥状态与接管状态', async () => {
 		const harness = makeRouter()
@@ -369,7 +486,7 @@ describe('路由：接管', () => {
 		const harness = makeRouter({ seamProvider: 'web-search-plus' })
 		await call(harness, 'POST', 'takeover', { target: 'default' })
 		// 模拟宿主按新配置重载 seam：指向官方提供方。
-		harness.ctx.web.searchProviderId = 'deepseek-official'
+		harness.seam.value = 'deepseek-official'
 		const res = await call(harness, 'GET', '')
 		assert.equal(res.json().takeover.active, false)
 		assert.equal(res.json().takeover.seamProvider, 'deepseek-official')
@@ -387,7 +504,7 @@ describe('路由：接管', () => {
 			available: () => true,
 			search: async () => ({ sources: [], truncated: false })
 		})
-		harness.ctx.web.searchProviderId = undefined
+		harness.seam.value = undefined
 		const res = await call(harness, 'GET', '')
 		const body = res.json()
 		assert.equal(body.takeover.ambiguous, true, '应当标记为歧义状态')
@@ -436,8 +553,88 @@ describe('路由：探测', () => {
 		assert.equal(body.attempts.length, 2)
 		assert.equal(body.attempts[0].ok, false)
 	})
-})
+	/*
+	 * 报障：「点击【交还官方搜索】再点击【试一次搜索】，搜索结果是按当前使用优先级来判定的；
+	 * 正确的是交还后不再考虑优先级，默认切回官方搜索」。
+	 *
+	 * 真实缺陷：probe 路由无条件调用 chain.searchWithReport()，完全不看 seam 现在选了谁。
+	 * 于是交还之后 seam 已是 deepseek-official，探测却仍按 tavily → deepseek 的顺序跑，
+	 * 并把「Tavily 命中」显示给用户 —— 与「尚未接管」的状态自相矛盾。
+	 * 现在 probe 与 snapshot 共用同一个 currentSeamProvider() 判据。
+	 */
+	it('已交还官方搜索时，探测不再走优先级链，而是走 seam 当前选中的提供方', async () => {
+		const harness = makeRouter({ seamProvider: 'deepseek-official' })
+		const res = await call(harness, 'POST', 'probe', {})
+		const body = res.json()
+		assert.equal(body.ok, true)
+		assert.equal(body.takenOver, false, '未接管时必须如实报告 takenOver=false')
+		assert.equal(body.seamProvider, 'deepseek-official')
+		assert.equal(body.route, undefined, '未接管时不该报告「经优先级链命中了某个节点」')
+		assert.equal(body.attempts.length, 1, '未接管时只有 seam 那一个提供方的尝试')
+		assert.equal(body.attempts[0].node, 'deepseek-official', '未接管时应走官方提供方')
+		assert.match(String(body.attempts[0].reason), /未走本插件的优先级链/, '要说明为什么没走链路')
+		assert.ok(!body.attempts.some((attempt) => attempt.node === 'tavily'), '交还后不得再按优先级链调用 tavily')
+	})
 
+	it('已接管时，探测仍然报告优先级链命中的节点', async () => {
+		const harness = makeRouter({ seamProvider: 'web-search-plus' })
+		const body = (await call(harness, 'POST', 'probe', {})).json()
+		assert.equal(body.takenOver, true)
+		assert.equal(body.route, 'tavily')
+
+	/*
+	 * seam 被指到别的第三方提供方时，本插件**不能拿官方结果冒充**。
+	 * 宁可报错并说清怎么回到优先级链，也不能显示一条「探测成功」的假结论。
+	 */
+	it('seam 指向其它提供方时，探测如实报错而不是拿官方结果顶替', async () => {
+		const harness = makeRouter({ seamProvider: 'deepseek-search-api' })
+		const res = await call(harness, 'POST', 'probe', {})
+		const body = res.json()
+		assert.equal(body.ok, false, '不能伪装成功')
+		assert.match(String(body.error), /只能代跑官方 DeepSeek/, '要说明为什么不能代跑')
+		assert.match(String(body.error), /立即接管/, '要给出回到优先级链的出路')
+	})	})
+})
+describe('路由：读取已保存密钥的明文（reveal）', () => {
+	/*
+	 * 报障：「保存过的密钥没法点小眼睛显示」。
+	 *
+	 * 快照（GET /）依然**绝不**包含明文；要看得明文只能走这个专用端点。它必须
+	 * 同时满足：只回配置里真实存在的槽位、非法引用名直接拒、每次只回一个。
+	 */
+	it('返回已保存密钥的明文，且带 no-store', async () => {
+		const harness = makeRouter({ credentials: { TAVILY_API_KEY: 'tvly-saved-123' } })
+		const res = await call(harness, 'POST', 'keys/value/reveal', { ref: 'TAVILY_API_KEY' })
+		assert.equal(res.captured.status, 200, res.captured.body)
+		assert.equal(res.json().value, 'tvly-saved-123', '应回明文供用户核对')
+		assert.match(String(res.captured.headers['cache-control']), /no-store/, '明文不能进任何缓存')
+	})
+
+	it('快照本身仍然不含明文', async () => {
+		const harness = makeRouter({ credentials: { TAVILY_API_KEY: 'tvly-saved-123' } })
+		const body = (await call(harness, 'GET', '')).json()
+		assert.ok(!JSON.stringify(body).includes('tvly-saved-123'), '快照泄漏了明文')
+	})
+
+	it('只回配置里存在的槽位，未知引用名 404', async () => {
+		const harness = makeRouter({ credentials: { TAVILY_API_KEY: 'tvly-a' } })
+		const res = await call(harness, 'POST', 'keys/value/reveal', { ref: 'SOME_OTHER_KEY' })
+		assert.equal(res.captured.status, 404, res.captured.body)
+	})
+
+	it('非法引用名直接 400，不做任何解析', async () => {
+		const harness = makeRouter({})
+		const res = await call(harness, 'POST', 'keys/value/reveal', { ref: '../etc/passwd' })
+		assert.equal(res.captured.status, 400, res.captured.body)
+	})
+
+	it('未配置的槽位 404，而不是回空串', async () => {
+		// 夹具默认预置一把密钥，这里显式清空以验证「未配置」分支。
+		const harness = makeRouter({ credentials: {} })
+		const res = await call(harness, 'POST', 'keys/value/reveal', { ref: 'TAVILY_API_KEY' })
+		assert.equal(res.captured.status, 404, res.captured.body)
+	})
+})
 describe('路由：降级路径', () => {
 	it('没有 settings 时回退到 configEditor', async () => {
 		const harness = makeRouter({ noSettings: true })
