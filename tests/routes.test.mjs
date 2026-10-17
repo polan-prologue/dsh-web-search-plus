@@ -342,6 +342,57 @@ describe('路由：来源校验（挡浏览器里的恶意页面）', () => {
 		assert.equal(res.captured.status, 200, 'Host 不带 scheme，Origin 带 https，应视为同源')
 	})
 
+	/*
+	 * 报障（0.1.4 仍然失败）：服务器上「webserver 绑 127.0.0.1 + 反向代理对外」，
+	 * 浏览器发来的 Host 是公网地址，既不等于绑定地址也不等于 origin，于是照样 403。
+	 *
+	 * 正解是读宿主 connection.trustedHosts（--trusted-host 声明的 authority），
+	 * 与宿主 isTrustedApiRequest() 完全同源。
+	 */
+	it('trustedHosts 声明了公网 authority 时放行（反代部署的正解）', async () => {
+		const harness = makeRouter({})
+		const res = await callWith(harness, 'GET', '', undefined, { host: '192.144.175.20:10443' }, {
+			binding: '127.0.0.1',
+			trustedHosts: ['192.144.175.20:10443']
+		})
+		assert.equal(res.captured.status, 200, '宿主已声明该 authority，插件必须认')
+	})
+
+	it('trustedHosts 带端口时不做通配（端口不符仍拒绝）', async () => {
+		const harness = makeRouter({})
+		const res = await callWith(harness, 'GET', '', undefined, { host: '192.144.175.20:9999' }, {
+			binding: '127.0.0.1',
+			trustedHosts: ['192.144.175.20:10443']
+		})
+		assert.equal(res.captured.status, 403, '带端口的条目必须精确匹配')
+	})
+
+	it('trustedHosts 不带端口时匹配任意端口', async () => {
+		const harness = makeRouter({})
+		const res = await callWith(harness, 'GET', '', undefined, { host: 'dsh.example.com:8443' }, {
+			binding: '127.0.0.1',
+			trustedHosts: ['dsh.example.com']
+		})
+		assert.equal(res.captured.status, 200, '无端口条目按任意端口匹配（与宿主一致）')
+	})
+
+	it('trustedHosts 只放行声明过的，其余仍拒绝', async () => {
+		const harness = makeRouter({})
+		const res = await callWith(harness, 'GET', '', undefined, { host: 'other.example.com' }, {
+			binding: '127.0.0.1',
+			trustedHosts: ['dsh.example.com']
+		})
+		assert.equal(res.captured.status, 403)
+	})
+
+	it('trustedHosts 放行后，跨源 Origin 仍然被拒', async () => {
+		const harness = makeRouter({})
+		const res = await callWith(harness, 'GET', '', undefined, {
+			host: '192.144.175.20:10443',
+			origin: 'https://evil.example.com'
+		}, { binding: '127.0.0.1', trustedHosts: ['192.144.175.20:10443'] })
+		assert.equal(res.captured.status, 403, 'Host 放行不能连带放宽 Origin')
+	})
 	it('读不到 webServer 部署信息时退化为只认回环，不放宽', async () => {
 		const harness = makeRouter({})
 		const localhost = await callWith(harness, 'GET', '', undefined, { host: '127.0.0.1:3124' }, {})
