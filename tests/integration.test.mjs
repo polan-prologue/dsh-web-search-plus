@@ -255,3 +255,39 @@ describe('真实接线：管理路由', () => {
 		assert.equal(body.attempts[0].ok, false)
 	})
 })
+
+
+describe('装配链路：路由必须拿到有 webServer 的 scope', () => {
+	/*
+	 * 报障（0.1.4 装了仍然失败）：服务器重启后打开插件页仍是
+	 * 「拒绝来源不明的 Host『192.144.175.20:10443』」。
+	 *
+	 * 根因不在判据，而在**装配**：`createRouter({ ctx, ... })` 传的是根 ctx，
+	 * 而 `webServer` / `connection` 只存在于 `ctx.inject` 回调的 scope 上。
+	 * 于是部署信息全是 undefined，判据退化成「只认回环」。
+	 *
+	 * 这条测试锁住「index.js 把 scope 传下去」这一事实——只靠路由单测发现不了它，
+	 * 因为路由单测自己构造 ctx，天然就带部署信息。
+	 */
+	it('index.js 把 inject 回调的 scope 传给 createRouter', async () => {
+		const { readFileSync } = await import('node:fs')
+		const source = readFileSync(new URL('../lib/index.js', import.meta.url), 'utf8')
+		assert.match(
+			source,
+			/handler:\s*createRouter\(\{[^}]*\bscope\b/u,
+			'createRouter 必须收到 scope：只有它上面才有 webServer / connection'
+		)
+	})
+
+	it('路由优先用 scope 读部署信息，缺省才退回 ctx', async () => {
+		const { readFileSync } = await import('node:fs')
+		const source = readFileSync(new URL('../lib/routes.js', import.meta.url), 'utf8')
+		assert.match(source, /const deploymentCtx = scope \?\? ctx/u, '必须有 scope 优先、ctx 兜底的取值')
+		assert.match(source, /deploymentCtx\.webServer\?\.host/u, '绑定地址要从 deploymentCtx 读')
+		assert.match(
+			source,
+			/deploymentCtx\.get\('connection'\)\?\.trustedHosts/u,
+			'trustedHosts 要从 deploymentCtx 读'
+		)
+	})
+})
