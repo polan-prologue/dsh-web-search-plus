@@ -1,6 +1,6 @@
 {
   "name": "dsh-web-search-plus",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "网页搜索++：DeepSeek 原生搜索与 Tavily 之间自由排序，多密钥轮换，交还即回官方。 · Provider priority for DSH web search with multi-key Tavily rotation.",
   "repository": {
     "type": "git",

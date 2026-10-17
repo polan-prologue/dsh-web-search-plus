@@ -578,6 +578,34 @@ describe('路由：接管', () => {
 		assert.deepEqual(harness.state.editedWeb.at(-1), { fetchProvider: 'http', searchProvider: 'web-search-plus' })
 	})
 
+	/*
+	 * 报障：服务器上「先点接管、再点试一次搜索」，得到
+	 * 「当前 seam 使用『自动选择』，本插件只能代跑官方 DeepSeek 探测」，
+	 * 用户以为接管失败了。
+	 *
+	 * 真实原因：宿主不热切换 web.searchProvider（启动时构造的 volatile 配置），
+	 * 写入 patch 层后运行时仍读旧值。插件必须如实告诉用户「需要重启」，
+	 * 否则界面看起来像失败。
+	 */
+	it('写入未生效时如实报告 pendingRestart，并说明需要重启', async () => {
+		// 夹具的 edit 会同步更新 seam，这里让它不更新，模拟「宿主未热切换」。
+		const harness = makeRouter({ seamProvider: 'deepseek-official' })
+		harness.ctx.web.config = { searchProvider: { get: () => undefined } }
+		const res = await call(harness, 'POST', 'takeover', {})
+		const body = res.json()
+		assert.equal(body.ok, true)
+		assert.equal(body.applied, 'web-search-plus', '配置本身要写成功')
+		assert.equal(body.pendingRestart, true, '运行时未切换时必须报 pendingRestart')
+		assert.match(String(body.message), /重启 DSH/u, '必须明确告诉用户需要重启')
+	})
+
+	it('已生效时 pendingRestart 为 false，消息是「已接管」', async () => {
+		const harness = makeRouter({ seamProvider: 'web-search-plus' })
+		const body = (await call(harness, 'POST', 'takeover', {})).json()
+		assert.equal(body.pendingRestart, false)
+		assert.match(String(body.message), /已接管/u)
+	})
+
 	it('交还官方搜索时写回显式提供方 id，而不是删掉字段', async () => {
 		/*
 		 * 这条以前断言「删除 searchProvider」，但那正是真实的联网搜索事故：
